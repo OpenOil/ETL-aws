@@ -11,6 +11,5 @@ The NorthDakotaOAGPull class takes a username, password, and file number (well n
 The main information will come back in a dictionary form, while the production data will come back in a pandas dataframe.
 
 Here is an example of how to call the 30216 well:
-
-  file_30216 = NorthDakotaOAGPull('username','password','30216')
-  main_info, prod_data = file_30216.get_main_info()
+file_30216 = NorthDakotaOAGPull('username','password','30216')
+main_info, prod_data = file_30216.get_main_info()
