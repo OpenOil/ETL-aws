@@ -1,0 +1,308 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Sat Nov 17 08:18:50 2018
+
+@author: SOICH
+"""
+
+import pandas as pd
+from bs4 import BeautifulSoup
+import requests
+
+class NorthDakotaOAGPull(object):
+  """
+  Pulls well info from https://www.dmr.nd.gov
+  The well information returns two different forms:
+          1. Main information (dictionary): Always available
+          2. Production information (Pandas Dataframe): Sometimes available
+          
+  Input: username and password for the https://www.dmr.nd.gov website
+  
+  Example code:
+      
+      file_30216 = NorthDakotaOAGPull('username','password','30216')
+      main_info, prod_data = file_30216.get_main_info()
+  """    
+  def __init__(self, username, password, file_num):
+      self.username = username
+      self.password = password
+      self.file_num = file_num
+      
+      r = requests.get('https://www.dmr.nd.gov/oilgas/feeservices/getwellprod.asp?fileNumber={}'.format(file_num), 
+                     auth = (self.username, self.password))
+    
+      if r.ok == True:
+          print('Login successful!\n')
+          
+              # Beautiful soup get's the correct text from the HTML and also get's it in 
+            # a library that allows pulling sections easier
+          soup = BeautifulSoup(r.text, 'lxml')
+          self.soup = soup
+            
+            # The main section of the HTML
+          main_info = soup.find_all('table')[1].find('div')
+          trans_1 = [x for x in main_info.text.split('\xa0') if x.strip() != '']
+            
+            # Array that will be parsed through
+          main_info_array = []
+            
+          for x in trans_1:
+              for y in x.split('\r\n'):
+                  if y != '':
+                      main_info_array.append(y.strip())
+                        
+            # Categories that can have multiple rows
+            # Keep the key to look for the first row
+            # idx will tell if that category is used or not, and if it has multiple rows or not
+          major_categories = {
+                'Completion Data': {'key':'Pool', 'idx': 0}
+                , 'Cumulative Production Data': {'key':'Pool', 'idx': 0}
+                , 'Production Test Data': {'key':'IP Test Date', 'idx': 0}
+            }
+            
+            # Find the Spots where the major categories are:
+          for idx, val in enumerate(main_info_array):
+              if val in major_categories:
+                  major_categories[val]['idx'] = idx
+                                    
+                                    
+          major_categories_list = []
+            # See which major categories are in the array
+          for m in major_categories:
+              if major_categories[m]['idx'] != 0:
+                  major_categories_list.append(m)
+                    
+                    
+            # Update the major_categories dictionary to show the key indexes
+            
+          for maj in major_categories_list:
+              major_key = major_categories[maj]['key'] 
+              start = major_categories[maj]['idx']
+              print(maj, ':', major_key, ':', start)
+                
+              key_array = []
+                
+              for maj_idx, line in enumerate(main_info_array[start+1:]):
+                    #print(line)
+                if line in major_categories_list:
+                    #print('\t Key Locations:', key_array)
+                    major_categories[maj]['Key Array'] = key_array
+                    break
+                if line.split(':')[0] == major_key:
+                    key_array.append(start + 1 + maj_idx)
+            #print('\t Key Locations:', key_array)
+          major_categories[maj]['Key Array'] = key_array
+                
+          self.major_categories = major_categories
+          self.major_categories_list = major_categories_list
+          self.main_info_array = main_info_array
+          
+      else:
+          print('Login unsuccessful')
+            
+
+  def get_info(self,new_array):
+    """
+        Runs through different scenarios of what values belong to what key topic and bring them together
+        Note - there can be values like [Interactive Performance Curve] [PDF Curve] that should be cleaned
+                up at another stage in the ETL process not to over complicate this one.
+    
+        Input: new_array - Array
+            This takes in the array (or section of array that wants to be looked at)
+            and cleans up the wording into a key and value dictionary
+        Output: final_dict - Dictionary
+    """
+    final_dict = {}
+    max_val = len(new_array)
+    idx = 0
+    
+    while idx < max_val:
+        line = new_array[idx]
+        #print(idx, line)
+        value_array = line.split(':')
+        next_idx = 1
+        # If there is a : in the current line and there is one in the next line, then just use the current line
+        if len(value_array) == 2:
+            try:
+                if ':' in new_array[idx + 1] and new_array[idx + 1] not in self.major_categories_list:
+                    #print({value_array[0].strip() : value_array[1].strip()})
+                    final_dict[value_array[0].strip()] = value_array[1].strip()
+                    idx += 1
+                    continue
+            except IndexError:
+                #print({value_array[0].strip() : value_array[1].strip()})
+                final_dict[value_array[0].strip()] = value_array[1].strip().replace('\nNo production data found for this well. Please try a different file number.','')
+                idx +=1
+                continue
+
+
+        # If there is a : in the current line, but there isn't one in the next one, keep going until you get another :
+        if len(value_array) == 2:
+            if new_array[idx + 1] in self.major_categories:
+                #print({value_array[0].strip() : value_array[1].strip()})
+                final_dict[value_array[0].strip()] = value_array[1].strip()
+                idx +=1 
+            else: # Look to see if there are more values that need to be pulled back
+                try:
+                    if ':' not in new_array[idx + 1]:
+                        colon_present = False
+                        next_idx +=1
+                        while colon_present == False:
+                            # If there are more values to pull that are not a major_category_list, then keep going
+                            if ':' not in new_array[idx + next_idx] and new_array[idx + next_idx] not in self.major_categories_list:
+                                next_idx += 1
+
+                            else:
+                                # Add other values to original array for later
+                                for x in new_array[idx + 1: idx + next_idx]:
+                                    value_array.append(x.strip())
+                                
+                                # The first value is the key, and then everything else can be joined together. 
+                                k = value_array[0].strip()
+                                vals = " ".join(value_array[1:])
+
+                                #print({ k : vals })
+                                final_dict[k] = vals.strip()
+                                
+                                colon_present = True
+                                idx += next_idx
+
+
+                except IndexError:
+                    print({value_array[0].strip() : value_array[1].strip()})
+                    final_dict[value_array[0].strip()] = value_array[1].strip()
+                    idx +=1
+                    continue
+
+        # Handle the major categories
+        if len(value_array) == 1:
+            if line in self.major_categories_list:
+                #print(line, ': This is where the major Categories Begin')
+                break
+                
+                
+    return final_dict 
+
+
+  def get_production_info(self,soup_html):
+    """
+    Get the production information for the specified well number
+    
+    INPUT - soup_html (Beautiful Soup output)
+            Takes in a soup object and parses through the final parts to look for a grid
+    
+    OUTPUT - Dataframe
+            Prints out dataframe with appropraiate columns. Some might have issues based on
+            bad HTML that is getting pulled
+    """
+    try:
+        # This looks at the last messed up section as a string and cleans it up so it looks
+        # like readable HTML
+        updated_last_string = str(self.soup.find_all('table')[2].find_all('tr')[-1]).replace('   ', '').replace('&gt;td ','<td').replace('/td<td', '</td><td').replace('&gt;/tr&gt;','</tr>').replace('\r\ntr','<tr>').replace('&gt;','>').replace('/td</tr>','</td></tr>').replace('<t>d ', '<td')
+    
+        # For loop that gets the strings in order with the correct tags 
+        fixed_array = []
+        for val in updated_last_string.split('</tr>'):
+            fixed_array.append(BeautifulSoup(val + '</tr>', 'html.parser'))
+    
+        #Bring together the lists to one master, clean list of information
+        prod_list_a = self.soup.find_all('table')[2].find_all('tr')[:-1]
+        total_prod_list = prod_list_a + fixed_array[:-2]
+    
+        # Get the arrays of data into one final array
+        final_prod_data = []
+    
+        for val in total_prod_list:
+            input_array = []
+            for t in val.find_all('td'):
+                #print(t.text)
+                input_array.append(t.text)
+            final_prod_data.append(input_array)
+    
+        # Create dataframe to return the columns and the correct info
+        prod_df = pd.DataFrame(final_prod_data
+                               ,columns = ['Pool', 'Date', 'Days', 'BBLS Oil'
+                                           , 'Runs', 'BBLS Water', 'MCF Prod', 'MCF Sold', 'Vent/Flare'])
+    
+        return prod_df
+    
+    except IndexError:
+        return None
+    
+  def get_main_info(self):
+    """
+          Gets the main information from the well data by using the get_info and get_production_info functions
+          INPUT - None
+          OUTPUT - main_info, production_data
+          
+          Example:
+              file_30216 = NorthDakotaOAGPull('username','password', '30216')
+              main_info, production_data =  file_30216.get_main_info()
+              
+    """
+    final_categories_dict = {}
+    
+    # Go through all of the usable major categories and get array placements
+    for idx, cat in enumerate(self.major_categories_list):
+        key_array = self.major_categories[cat]['Key Array']
+        start = self.major_categories[cat]['idx'] + 1
+        
+        # If there is only one line for the specific category
+        if len(key_array) == 1:
+            
+            # Get info from start index to next index start
+            try:
+                next_start = self.major_categories[self.major_categories_list[idx + 1]]['idx']
+                #print(get_info(main_info_array[start:next_start+1]))
+                final_categories_dict[cat] = self.get_info(self.main_info_array[start:next_start+1])
+            
+            # Get info from start index end of the array
+            except IndexError:
+                #print(get_info(main_info_array[start:]))
+                #get_info(main_info_array[start:])
+                final_categories_dict[cat] = self.get_info(self.main_info_array[start:])
+        
+        else:
+            
+            # Figure out what is the last index in the key_array
+            total_array = len(key_array)
+            
+            # List of dicionary information
+            total_rows_list = []
+            
+            
+            for node in range(total_array):
+                
+                # If this node is the last in the array, look at the next major category start
+                if node +1 == total_array:
+                    
+                    start = key_array[node]
+                    
+                    # Get info from start index to next index start
+                    try:
+                        
+                        end = self.major_categories[self.major_categories_list[idx + 1]]['Key Array']
+                        #print(get_info(main_info_array[start:end[0]+1]))
+                        total_rows_list.append(self.get_info(self.main_info_array[start:end[0]+1]))
+                        
+                    # This is the last category, so just get the information through the end
+                    except IndexError:
+                        
+                        #print(get_info(main_info_array[start:]))
+                        total_rows_list.append(self.get_info(self.main_info_array[start:end[0]+1]))
+                
+                # There are more nodes to the array, so get info from this node to the next node
+                else:
+                    start = key_array[node]
+                    end = key_array[node+1]
+                    #print(get_info(main_info_array[start:end+1]))
+                    total_rows_list.append(self.get_info(self.main_info_array[start:end+1]))
+            
+            # Bring all of the nodes together
+            final_categories_dict[cat] = total_rows_list
+            
+    return dict(self.get_info(self.main_info_array),**(final_categories_dict)), self.get_production_info(self.soup)
+ 
+
+
